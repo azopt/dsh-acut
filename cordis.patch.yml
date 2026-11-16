@@ -1,0 +1,13 @@
+# dsh-acut bundle patch：挂上 Host 半边。
+# 页面半边由 package.json 的 dsh.client 声明，行名必须是包名本身。
+#
+# config（都可省略）：
+#   outputDir  截图落盘目录，默认 %USERPROFILE%\Pictures\DSH Screenshots
+#   frames     滚屏截图的帧数上限，默认 14
+#   delayMs    每帧之间的等待毫秒，默认 320
+#   language   界面语言，默认 auto = 跟随系统
+#              可写 zh / zh-Hant / en / ja / ko / de / fr / es / ru / pt 钉死某一门
+- insert:
+    - id: acut
+      name: 'dsh-acut'
+      config: {}

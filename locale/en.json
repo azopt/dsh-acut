@@ -1,0 +1,8 @@
+{
+  "meta": {
+    "title": "ACut screenshot",
+    "description": "Screenshot plugin: region capture, annotation, scrolling long capture with a live stitched preview, and pin-to-screen; the same engine is exposed to the agent as a screenshot tool.",
+    "detail": "docs/DETAIL.md"
+  },
+  "hotkey": "Ctrl+Shift+X"
+}

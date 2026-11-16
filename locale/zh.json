@@ -1,0 +1,8 @@
+{
+  "meta": {
+    "title": "ACut 截图",
+    "description": "截图插件：区域框选、标注、滚屏拼成长截图、悬浮预览拼接结果、一键钉住置顶；同一套引擎也作为 screenshot 工具交给 Agent 用。",
+    "detail": "docs/DETAIL.md"
+  },
+  "hotkey": "Ctrl+Shift+X"
+}
