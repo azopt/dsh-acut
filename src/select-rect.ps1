@@ -28,6 +28,7 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+$PROBE_SCRIPT = Join-Path $PSScriptRoot 'uia-probe.ps1'
 Add-Type -AssemblyName System.Drawing
 Add-Type -AssemblyName System.Windows.Forms
 
@@ -52,20 +53,14 @@ public static class AcutSnap {
   [DllImport("user32.dll")] public static extern int GetWindowThreadProcessId(IntPtr hWnd, out int pid);
   [DllImport("user32.dll")] public static extern IntPtr GetAncestor(IntPtr hWnd, uint flags);
   [DllImport("dwmapi.dll")] public static extern int DwmGetWindowAttribute(IntPtr hWnd, int attr, out AcutRect rect, int size);
+  [DllImport("dwmapi.dll")] public static extern int DwmGetWindowAttribute(IntPtr hWnd, int attr, out int value, int size);
+  [DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern int GetClassName(IntPtr hWnd, StringBuilder text, int max);
 }
 '@
 }
 
 try { [AcutSnap]::SetProcessDPIAware() | Out-Null } catch { }
 
-$uia = $null
-try {
-  Add-Type -AssemblyName UIAutomationClient
-  Add-Type -AssemblyName UIAutomationTypes
-  $uia = [System.Windows.Automation.AutomationElement]
-} catch {
-  # Without UIA we still snap at the window level
-}
 
 function Emit($obj) {
   $json = $obj | ConvertTo-Json -Compress -Depth 4
@@ -129,63 +124,102 @@ function Get-WindowAt([int]$sx, [int]$sy) {
   return @{ hwnd = $script:found; rect = $script:foundRect; title = $script:foundTitle }
 }
 
-function Get-UiaChain([IntPtr]$hwnd, [int]$sx, [int]$sy) {
-  if (-not $uia) { return @() }
-  $chain = New-Object System.Collections.ArrayList
+function Get-ClassOf([IntPtr]$h) {
+  $sb = New-Object System.Text.StringBuilder 256
+  [void][AcutSnap]::GetClassName($h, $sb, 256)
+  return $sb.ToString()
+}
+
+function Test-SnapWindow([IntPtr]$h) {
+  $cls = Get-ClassOf $h
+  if ($cls -match 'IME|MSCTF|Windows\.UI\.Core\.CoreWindow|ApplicationManager|ForegroundStaging') { return $false }
+  $cloaked = 0
+  try { [void][AcutSnap]::DwmGetWindowAttribute($h, 14, [ref]$cloaked, 4) } catch { $cloaked = 0 }
+  if ($cloaked -ne 0) { return $false }
+  return $true
+}
+
+# The accessibility walk runs in a child process: a slow or hung provider must
+# never freeze the selector. Results are cached per window.
+function Start-Probe([long]$hwnd, [int]$sx, [int]$sy) {
+  if ($script:probeBanned.ContainsKey($hwnd)) { return }
+  $cached = $script:probeCache[$hwnd]
+  if ($cached -and $script:probePoint -and [Math]::Abs($sx - $script:probePoint.x) -lt 40 -and [Math]::Abs($sy - $script:probePoint.y) -lt 40) { return }
+  if ($script:probe) {
+    try { if (-not $script:probe.proc.HasExited) { return } } catch { }
+  }
+  if (($script:probeLast -ne $null) -and (([DateTime]::Now) - $script:probeLast).TotalMilliseconds -lt 350) { return }
+  if (-not (Test-Path $PROBE_SCRIPT)) { return }
   try {
-    $root = $uia::FromHandle($hwnd)
-    if (-not $root) { return @() }
-    $walker = [System.Windows.Automation.TreeWalker]::ControlViewWalker
-    $pt = New-Object System.Windows.Point($sx, $sy)
-    $node = $root
-    for ($depth = 0; $depth -lt 12; $depth++) {
-      $child = $walker.GetFirstChild($node)
-      $next = $null
-      $guard = 0
-      while ($child -and $guard -lt 200) {
-        $guard++
-        try {
-          $r = $child.Current.BoundingRectangle
-          if ($r.Width -gt 6 -and $r.Height -gt 6 -and $r.Width -lt 30000 -and $r.Contains($pt)) { $next = $child; break }
-        } catch { }
-        $child = $walker.GetNextSibling($child)
-      }
-      if (-not $next) { break }
-      $label = ''
-      try { $label = [string]$next.Current.Name } catch { }
-      if (-not $label) { try { $label = [string]$next.Current.ControlType.ProgrammaticName -replace 'ControlType\.', '' } catch { } }
-      $rr = $null
-      try { $rr = $next.Current.BoundingRectangle } catch { }
-      if ($rr) {
-        [void]$chain.Add(@{
-          x = [int][Math]::Round($rr.X); y = [int][Math]::Round($rr.Y)
-          width = [int][Math]::Round($rr.Width); height = [int][Math]::Round($rr.Height)
-          label = $label
-        })
-      }
-      $node = $next
+    $psi = New-Object System.Diagnostics.ProcessStartInfo
+    $psi.FileName = 'powershell.exe'
+    $psi.Arguments = ('-NoProfile -NonInteractive -ExecutionPolicy Bypass -File "{0}" -Hwnd {1} -X {2} -Y {3}' -f $PROBE_SCRIPT, $hwnd, $sx, $sy)
+    $psi.UseShellExecute = $false
+    $psi.RedirectStandardOutput = $true
+    $psi.CreateNoWindow = $true
+    $proc = [System.Diagnostics.Process]::Start($psi)
+    $script:probe = @{ proc = $proc; hwnd = $hwnd }
+    $script:probePoint = @{ x = $sx; y = $sy }
+    $script:probeLast = [DateTime]::Now
+  } catch {
+    $script:probeBanned[$hwnd] = $true
+  }
+}
+
+function Collect-Probe() {
+  $p = $script:probe
+  if (-not $p) { return $false }
+  $done = $false
+  try { $done = $p.proc.HasExited } catch { $done = $true }
+  if (-not $done) {
+    if ((([DateTime]::Now) - $script:probeLast).TotalMilliseconds -gt 1600) {
+      try { $p.proc.Kill() } catch { }
+      $script:probeBanned[$p.hwnd] = $true
+      $script:probe = $null
+      return $true
     }
-  } catch { }
-  return , $chain
+    return $false
+  }
+  $out = ''
+  try { $out = $p.proc.StandardOutput.ReadToEnd() } catch { $out = '' }
+  $script:probe = $null
+  $parsed = @()
+  try {
+    if ($out.Trim()) { $parsed = @($out | ConvertFrom-Json) }
+  } catch { $parsed = @() }
+  if ($parsed.Count -gt 0) { $script:probeCache[$p.hwnd] = $parsed }
+  else { $script:probeBanned[$p.hwnd] = $true }
+  return $true
 }
 
 function Get-Candidates([int]$sx, [int]$sy) {
   $list = New-Object System.Collections.ArrayList
   $win = Get-WindowAt $sx $sy
-  if ($win) {
-    $title = $win.title
-    if ([string]::IsNullOrWhiteSpace($title)) { $title = 'Window' }
-    $chain = Get-UiaChain $win.hwnd $sx $sy
-    if ($chain -and $chain.Count -gt 0) {
-      # Deepest entry is the innermost element; walk outwards from there
-      for ($i = $chain.Count - 1; $i -ge 0; $i--) {
-        $c = $chain[$i]
-        [void]$list.Add(@{ x = $c.x; y = $c.y; width = $c.width; height = $c.height; label = $(if ($c.label) { $c.label } else { $title }) })
-      }
-    }
-    [void]$list.Add(@{ x = $win.rect.X; y = $win.rect.Y; width = $win.rect.Width; height = $win.rect.Height; label = $title })
+  if (-not $win) {
+    $script:windowHwnd = 0
+    return , $list
   }
-  # Drop duplicate rects - UIA often reports the same box at several levels
+  if (-not (Test-SnapWindow $win.hwnd)) {
+    $script:windowHwnd = 0
+    return , $list
+  }
+  $hwnd = [long]$win.hwnd
+  $script:windowHwnd = $hwnd
+  $title = $win.title
+  if ([string]::IsNullOrWhiteSpace($title)) { $title = 'Window' }
+  $cached = $script:probeCache[$hwnd]
+  if ($cached) {
+    foreach ($c in $cached) {
+      if ($c.width -lt 8 -or $c.height -lt 8) { continue }
+      if ($sx -lt $c.x -or $sx -ge ($c.x + $c.width) -or $sy -lt $c.y -or $sy -ge ($c.y + $c.height)) { continue }
+      $label = [string]$c.label
+      if ([string]::IsNullOrWhiteSpace($label)) { $label = $title }
+      [void]$list.Add(@{ x = $c.x; y = $c.y; width = $c.width; height = $c.height; label = $label })
+    }
+  }
+  [void]$list.Add(@{ x = $win.rect.X; y = $win.rect.Y; width = $win.rect.Width; height = $win.rect.Height; label = $title })
+  Start-Probe $hwnd $sx $sy
+  # Drop duplicate rects - accessibility often reports the same box at several levels.
   $seen = @{}
   $out = New-Object System.Collections.ArrayList
   foreach ($item in $list) {
@@ -227,6 +261,12 @@ $script:anchor = $null
 $script:cancelled = $false
 $script:candidates = @()
 $script:snapIndex = 0
+$script:windowHwnd = 0
+$script:probe = $null
+$script:probeCache = @{}
+$script:probeBanned = @{}
+$script:probePoint = $null
+$script:probeLast = $null
 $script:lastQuery = [DateTime]::MinValue
 $script:mouse = New-Object System.Drawing.Point(0, 0)
 
@@ -250,13 +290,8 @@ $form.Cursor = [System.Windows.Forms.Cursors]::Cross
 $form.KeyPreview = $true
 $form.Text = 'ACut'
 
-try {
-  $flags = [System.Reflection.BindingFlags]::Instance -bor [System.Reflection.BindingFlags]::NonPublic
-  $pi = [System.Windows.Forms.Control].GetProperty('DoubleBuffered', $flags)
-  if ($pi) { $pi.SetValue($form, $true) }
-} catch {
-  # Without double buffering it still works, the drag just flickers a little.
-}
+# NOTE: double buffering is deliberately NOT enabled - a buffered 3440x1440
+# fullscreen form repaints unreliably here, the dim layer ends up not being shown.
 
 function Clamp-Rect([System.Drawing.Rectangle]$r) {
   $x = [Math]::Max(0, [Math]::Min($r.X, $vs.Width - 1))
@@ -479,6 +514,18 @@ $form.Add_Paint({
   $g.DrawLine($penGuide, $px, 0, $px, $vs.Height)
   $g.DrawLine($penGuide, 0, $py, $vs.Width, $py)
 })
+
+# The accessibility probe finishes in its own process; pick the result up here.
+$timer = New-Object System.Windows.Forms.Timer
+$timer.Interval = 160
+$timer.Add_Tick({
+  if (Collect-Probe) {
+    Refresh-Candidates $script:mouse.X $script:mouse.Y $true
+    $form.Invalidate()
+  }
+})
+$timer.Start()
+$form.Add_FormClosed({ $timer.Stop() })
 
 [void]$form.ShowDialog()
 
