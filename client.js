@@ -195,49 +195,69 @@ window.__ModuleLoader__.load({
     }
 
     /**
-     * 全屏冻结 + 原生框选：截桌面上任何东西（浏览器、别的应用、桌面本身），
-     * 框到哪块就把哪块按原始像素裁下来，再回到这里标注/保存。
-     * 宿主不支持（非 Windows、助手起不来）时退回窗口内冻结。
+     * 把 host 返回的一张位图摆成冻结帧：等比缩进窗口、居中，再把选区（可选）预设成整张。
+     * @param {{dataUrl:string,width:number,height:number,screenRect?:object}} data
+     * @param {{presetRect:boolean}} options
+     */
+    function presentFrozen(data, options) {
+      const imgW = Math.max(1, Number(data.width) || 1)
+      const imgH = Math.max(1, Number(data.height) || 1)
+      const vw = window.innerWidth
+      const vh = window.innerHeight
+      const fit = Math.min(1, (vw - 48) / imgW, (vh - 140) / imgH)
+      const cssW = Math.max(1, Math.round(imgW * fit))
+      const scale = imgW / cssW
+      const cssH = Math.max(1, Math.round(imgH / scale))
+      const offsetX = Math.round((vw - cssW) / 2)
+      const offsetY = Math.round((vh - cssH) / 2)
+      log(`presentFrozen ${imgW}x${imgH} css=${cssW}x${cssH} scale=${scale.toFixed(2)} preset=${options.presetRect}`)
+      store.set({
+        phase: 'select',
+        frozen: { dataUrl: data.dataUrl, width: imgW, height: imgH, cssWidth: cssW, cssHeight: cssH, scale, offsetX, offsetY, source: 'crop', screenRect: data.screenRect },
+        rect: options.presetRect ? { x: offsetX, y: offsetY, width: cssW, height: cssH } : null,
+        annotations: [],
+        draft: null,
+      })
+    }
+
+    /**
+     * 截图入口，三层降级：
+     * 1. 原生全屏框选（整块桌面上随便框，浏览器/别的应用都行）
+     * 2. 拿不到原生层时：抓整屏，在窗口里当缩略图框选
+     * 3. 再不行：退回原来的"只框本窗口"路径
      */
     async function startCapture(mode = 'rect') {
       if (store.state.phase !== 'idle' && store.state.phase !== 'select') return
       log(`startCapture:${mode}`)
       store.set({ phase: 'capturing' })
+      const hints = {
+        hint: T('拖动框选区域 · 桌面 / 浏览器任意位置', 'Drag to select — anywhere on screen'),
+        hintKeys: T('方向键微调 1px · Shift+方向键 10px · Alt+方向键改大小', 'Arrows 1px · Shift+arrows 10px · Alt+arrows resize'),
+        hintDone: T('Enter 完成 · Esc 取消 · 双击 = 整屏', 'Enter confirm · Esc cancel · double-click = whole screen'),
+      }
       try {
-        const data = await post('select', {
-          mode,
-          hint: T('拖动框选区域 · 桌面 / 浏览器任意位置', 'Drag to select — anywhere on screen'),
-          hintKeys: T('方向键微调 1px · Shift+方向键 10px · Alt+方向键改大小', 'Arrows 1px · Shift+arrows 10px · Alt+arrows resize'),
-          hintDone: T('Enter 完成 · Esc 取消 · 双击 = 整屏', 'Enter confirm · Esc cancel · double-click = whole screen'),
-        })
+        const data = await post('select', { mode, ...hints })
         if (data.cancelled) {
           store.reset()
           return
         }
         if (!data.ok) throw new Error(data.error || 'native select unavailable')
-        const imgW = Math.max(1, Number(data.width) || 1)
-        const imgH = Math.max(1, Number(data.height) || 1)
-        const vw = window.innerWidth
-        const vh = window.innerHeight
-        const fit = Math.min(1, (vw - 48) / imgW, (vh - 140) / imgH)
-        const cssW = Math.max(1, Math.round(imgW * fit))
-        const scale = imgW / cssW
-        const cssH = Math.max(1, Math.round(imgH / scale))
-        const offsetX = Math.round((vw - cssW) / 2)
-        const offsetY = Math.round((vh - cssH) / 2)
-        log(`startCapture:ok ${imgW}x${imgH} css=${cssW}x${cssH} scale=${scale.toFixed(2)}`)
-        store.set({
-          phase: 'select',
-          frozen: { dataUrl: data.dataUrl, width: imgW, height: imgH, cssWidth: cssW, cssHeight: cssH, scale, offsetX, offsetY, source: 'crop', screenRect: data.screenRect },
-          rect: { x: offsetX, y: offsetY, width: cssW, height: cssH },
-          annotations: [],
-          draft: null,
-        })
+        presentFrozen(data, { presetRect: true })
+        return
       } catch (error) {
-        log(`startCapture:fallback ${String(error?.message ?? error)}`)
-        store.reset()
-        await openCapture()
+        log(`startCapture:native unavailable ${String(error?.message ?? error)}`)
       }
+      try {
+        // 退一步：抓整屏，让用户在窗口里的缩略图上框（精度差一点，但能截到任何画面）。
+        const data = await post('select', { mode: 'full', ...hints })
+        if (!data.ok) throw new Error(data.error || 'no desktop frame')
+        presentFrozen(data, { presetRect: mode === 'full' })
+        return
+      } catch (error) {
+        log(`startCapture:thumbnail unavailable ${String(error?.message ?? error)}`)
+      }
+      store.reset()
+      await openCapture()
     }
 
     /* ── 几何与绘制 ───────────────────────────────────────────────────────── */
