@@ -1,7 +1,10 @@
 # dsh-acut native screen selector (Windows / WinForms).
 #
-# Freezes the whole virtual desktop, shows it full screen, and lets the user
-# drag a rectangle over anything on screen (desktop, browser, any app).
+# Freezes the whole virtual desktop, shows it full screen, and lets the user frame
+# anything on screen. Hovering snaps to what is under the cursor: first the element
+# (a window's inner pane / a web page node), then its parents, then the whole window.
+# Tab cycles through those levels, Ctrl disables snapping for a free drag.
+#
 # Keyboard: arrows = move by 1px, Shift+arrows = 10px, Alt+arrows = resize,
 # Enter = confirm, Esc = cancel, double-click = whole screen.
 #
@@ -19,7 +22,7 @@ param(
   [string]$Mode = 'rect',
   [string]$Out = '',
   [string]$Hint = 'Drag to select a region',
-  [string]$HintKeys = 'Arrows move / Shift x10 / Alt resize',
+  [string]$HintKeys = 'Arrows move / Tab cycle / Ctrl free drag',
   [string]$HintDone = 'Enter confirm / Esc cancel',
   [int]$DimOpacity = 118
 )
@@ -28,18 +31,41 @@ $ErrorActionPreference = 'Stop'
 Add-Type -AssemblyName System.Drawing
 Add-Type -AssemblyName System.Windows.Forms
 
-if (-not ('AcutSelectNative' -as [type])) {
+if (-not ('AcutSnap' -as [type])) {
   Add-Type @'
 using System;
+using System.Text;
 using System.Runtime.InteropServices;
-public static class AcutSelectNative {
+[StructLayout(LayoutKind.Sequential)]
+public struct AcutRect { public int Left, Top, Right, Bottom; }
+[StructLayout(LayoutKind.Sequential)]
+public struct AcutPoint { public int X, Y; }
+public static class AcutSnap {
+  public delegate bool EnumProc(IntPtr hWnd, IntPtr lParam);
   [DllImport("user32.dll")] public static extern bool SetProcessDPIAware();
-  [DllImport("user32.dll")] public static extern bool SetCursorPos(int X, int Y);
+  [DllImport("user32.dll")] public static extern bool EnumWindows(EnumProc cb, IntPtr lParam);
+  [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr hWnd);
+  [DllImport("user32.dll")] public static extern bool IsIconic(IntPtr hWnd);
+  [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr hWnd, out AcutRect rect);
+  [DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern int GetWindowText(IntPtr hWnd, StringBuilder text, int max);
+  [DllImport("user32.dll")] public static extern int GetWindowTextLength(IntPtr hWnd);
+  [DllImport("user32.dll")] public static extern int GetWindowThreadProcessId(IntPtr hWnd, out int pid);
+  [DllImport("user32.dll")] public static extern IntPtr GetAncestor(IntPtr hWnd, uint flags);
+  [DllImport("dwmapi.dll")] public static extern int DwmGetWindowAttribute(IntPtr hWnd, int attr, out AcutRect rect, int size);
 }
 '@
 }
 
-try { [AcutSelectNative]::SetProcessDPIAware() | Out-Null } catch { }
+try { [AcutSnap]::SetProcessDPIAware() | Out-Null } catch { }
+
+$uia = $null
+try {
+  Add-Type -AssemblyName UIAutomationClient
+  Add-Type -AssemblyName UIAutomationTypes
+  $uia = [System.Windows.Automation.AutomationElement]
+} catch {
+  # Without UIA we still snap at the window level
+}
 
 function Emit($obj) {
   $json = $obj | ConvertTo-Json -Compress -Depth 4
@@ -50,7 +76,6 @@ function Emit($obj) {
 $vs = [System.Windows.Forms.SystemInformation]::VirtualScreen
 if ($vs.Width -lt 2 -or $vs.Height -lt 2) { Emit @{ ok = $false; error = 'no screen' }; exit 3 }
 
-# Freeze the desktop BEFORE the window appears, so the overlay is not in its own picture.
 $full = New-Object System.Drawing.Bitmap($vs.Width, $vs.Height, [System.Drawing.Imaging.PixelFormat]::Format32bppArgb)
 $grab = [System.Drawing.Graphics]::FromImage($full)
 try {
@@ -69,9 +94,112 @@ function Save-Crop([System.Drawing.Rectangle]$rect) {
   return $safe
 }
 
-$fullRect = New-Object System.Drawing.Rectangle(0, 0, $vs.Width, $vs.Height)
+function Get-WindowAt([int]$sx, [int]$sy) {
+  $script:found = [IntPtr]::Zero
+  $script:foundRect = $null
+  $script:foundTitle = ''
+  $self = $PID
+  $cb = [AcutSnap+EnumProc]{
+    param($hWnd, $lParam)
+    if ([AcutSnap]::IsWindowVisible($hWnd) -eq $false) { return $true }
+    if ([AcutSnap]::IsIconic($hWnd)) { return $true }
+    $owner = 0
+    [void][AcutSnap]::GetWindowThreadProcessId($hWnd, [ref]$owner)
+    if ($owner -eq $self) { return $true }
+    $r = New-Object AcutRect
+    $ok = $false
+    try { $ok = ([AcutSnap]::DwmGetWindowAttribute($hWnd, 9, [ref]$r, 16) -eq 0) } catch { $ok = $false }
+    if (-not $ok) { if (-not [AcutSnap]::GetWindowRect($hWnd, [ref]$r)) { return $true } }
+    $w = $r.Right - $r.Left
+    $h = $r.Bottom - $r.Top
+    if ($w -lt 40 -or $h -lt 40) { return $true }
+    if ($sx -lt $r.Left -or $sx -ge $r.Right -or $sy -lt $r.Top -or $sy -ge $r.Bottom) { return $true }
+    $script:found = $hWnd
+    $script:foundRect = New-Object System.Drawing.Rectangle($r.Left, $r.Top, $w, $h)
+    $len = [AcutSnap]::GetWindowTextLength($hWnd)
+    if ($len -gt 0) {
+      $sb = New-Object System.Text.StringBuilder ($len + 2)
+      [void][AcutSnap]::GetWindowText($hWnd, $sb, $sb.Capacity)
+      $script:foundTitle = $sb.ToString()
+    }
+    return $false
+  }
+  [void][AcutSnap]::EnumWindows($cb, [IntPtr]::Zero)
+  if ($script:found -eq [IntPtr]::Zero) { return $null }
+  return @{ hwnd = $script:found; rect = $script:foundRect; title = $script:foundTitle }
+}
+
+function Get-UiaChain([IntPtr]$hwnd, [int]$sx, [int]$sy) {
+  if (-not $uia) { return @() }
+  $chain = New-Object System.Collections.ArrayList
+  try {
+    $root = $uia::FromHandle($hwnd)
+    if (-not $root) { return @() }
+    $walker = [System.Windows.Automation.TreeWalker]::ControlViewWalker
+    $pt = New-Object System.Windows.Point($sx, $sy)
+    $node = $root
+    for ($depth = 0; $depth -lt 12; $depth++) {
+      $child = $walker.GetFirstChild($node)
+      $next = $null
+      $guard = 0
+      while ($child -and $guard -lt 200) {
+        $guard++
+        try {
+          $r = $child.Current.BoundingRectangle
+          if ($r.Width -gt 6 -and $r.Height -gt 6 -and $r.Width -lt 30000 -and $r.Contains($pt)) { $next = $child; break }
+        } catch { }
+        $child = $walker.GetNextSibling($child)
+      }
+      if (-not $next) { break }
+      $label = ''
+      try { $label = [string]$next.Current.Name } catch { }
+      if (-not $label) { try { $label = [string]$next.Current.ControlType.ProgrammaticName -replace 'ControlType\.', '' } catch { } }
+      $rr = $null
+      try { $rr = $next.Current.BoundingRectangle } catch { }
+      if ($rr) {
+        [void]$chain.Add(@{
+          x = [int][Math]::Round($rr.X); y = [int][Math]::Round($rr.Y)
+          width = [int][Math]::Round($rr.Width); height = [int][Math]::Round($rr.Height)
+          label = $label
+        })
+      }
+      $node = $next
+    }
+  } catch { }
+  return , $chain
+}
+
+function Get-Candidates([int]$sx, [int]$sy) {
+  $list = New-Object System.Collections.ArrayList
+  $win = Get-WindowAt $sx $sy
+  if ($win) {
+    $title = $win.title
+    if ([string]::IsNullOrWhiteSpace($title)) { $title = 'Window' }
+    $chain = Get-UiaChain $win.hwnd $sx $sy
+    if ($chain -and $chain.Count -gt 0) {
+      # Deepest entry is the innermost element; walk outwards from there
+      for ($i = $chain.Count - 1; $i -ge 0; $i--) {
+        $c = $chain[$i]
+        [void]$list.Add(@{ x = $c.x; y = $c.y; width = $c.width; height = $c.height; label = $(if ($c.label) { $c.label } else { $title }) })
+      }
+    }
+    [void]$list.Add(@{ x = $win.rect.X; y = $win.rect.Y; width = $win.rect.Width; height = $win.rect.Height; label = $title })
+  }
+  # Drop duplicate rects - UIA often reports the same box at several levels
+  $seen = @{}
+  $out = New-Object System.Collections.ArrayList
+  foreach ($item in $list) {
+    $key = '{0},{1},{2},{3}' -f $item.x, $item.y, $item.width, $item.height
+    if ($seen.ContainsKey($key)) { continue }
+    $seen[$key] = $true
+    if ($item.width -lt 8 -or $item.height -lt 8) { continue }
+    [void]$out.Add($item)
+  }
+  return , $out
+}
 
 if ($Mode -eq 'full') {
+  $fullRect = New-Object System.Drawing.Rectangle(0, 0, $vs.Width, $vs.Height)
   $safe = Save-Crop $fullRect
   Emit @{
     ok = $true
@@ -82,26 +210,31 @@ if ($Mode -eq 'full') {
   exit 0
 }
 
-# Dim layer: one darkened copy of the freeze, drawn as the base of every paint.
 $dim = New-Object System.Drawing.Bitmap($full.Width, $full.Height, [System.Drawing.Imaging.PixelFormat]::Format32bppArgb)
 $d = [System.Drawing.Graphics]::FromImage($dim)
 try {
   $d.DrawImage($full, 0, 0, $full.Width, $full.Height)
-  $brush = New-Object System.Drawing.SolidBrush([System.Drawing.Color]::FromArgb($DimOpacity, 0, 0, 0))
-  try { $d.FillRectangle($brush, 0, 0, $dim.Width, $dim.Height) } finally { $brush.Dispose() }
+  $brushDim = New-Object System.Drawing.SolidBrush([System.Drawing.Color]::FromArgb($DimOpacity, 0, 0, 0))
+  try { $d.FillRectangle($brushDim, 0, 0, $dim.Width, $dim.Height) } finally { $brushDim.Dispose() }
 } finally {
   $d.Dispose()
 }
 
 $script:sel = $null
 $script:dragging = $false
+$script:pressed = $false
 $script:anchor = $null
-$script:result = $null
 $script:cancelled = $false
+$script:candidates = @()
+$script:snapIndex = 0
+$script:lastQuery = [DateTime]::MinValue
+$script:mouse = New-Object System.Drawing.Point(0, 0)
 
 $font = New-Object System.Drawing.Font('Segoe UI', 9)
 $fontBig = New-Object System.Drawing.Font('Segoe UI', 10, [System.Drawing.FontStyle]::Bold)
 $penBorder = New-Object System.Drawing.Pen([System.Drawing.Color]::FromArgb(255, 36, 122, 245), 2)
+$penSnap = New-Object System.Drawing.Pen([System.Drawing.Color]::FromArgb(255, 122, 245, 168), 2)
+$penSnap.DashStyle = [System.Drawing.Drawing2D.DashStyle]::Dash
 $penGuide = New-Object System.Drawing.Pen([System.Drawing.Color]::FromArgb(120, 255, 255, 255), 1)
 $brushLabelBg = New-Object System.Drawing.SolidBrush([System.Drawing.Color]::FromArgb(235, 30, 30, 34))
 $brushLabelFg = New-Object System.Drawing.SolidBrush([System.Drawing.Color]::White)
@@ -117,7 +250,6 @@ $form.Cursor = [System.Windows.Forms.Cursors]::Cross
 $form.KeyPreview = $true
 $form.Text = 'ACut'
 
-# Control.DoubleBuffered is public to read but protected to set, so reach it by reflection.
 try {
   $flags = [System.Reflection.BindingFlags]::Instance -bor [System.Reflection.BindingFlags]::NonPublic
   $pi = [System.Windows.Forms.Control].GetProperty('DoubleBuffered', $flags)
@@ -141,6 +273,27 @@ function Set-Selection([int]$x1, [int]$y1, [int]$x2, [int]$y2) {
   $h = [Math]::Abs($y2 - $y1)
   if ($w -lt 1 -or $h -lt 1) { return }
   $script:sel = Clamp-Rect (New-Object System.Drawing.Rectangle($left, $top, $w, $h))
+}
+
+function Snap-RectAt([int]$x, [int]$y) {
+  if ($script:candidates.Count -eq 0) { return $null }
+  $idx = [Math]::Min($script:snapIndex, $script:candidates.Count - 1)
+  $c = $script:candidates[$idx]
+  $r = New-Object System.Drawing.Rectangle(
+    ($c.x - $vs.Left), ($c.y - $vs.Top), $c.width, $c.height)
+  return Clamp-Rect $r
+}
+
+function Refresh-Candidates([int]$x, [int]$y, [bool]$force) {
+  $now = [DateTime]::Now
+  if (-not $force -and ($now - $script:lastQuery).TotalMilliseconds -lt 260) { return }
+  $script:lastQuery = $now
+  try {
+    $script:candidates = Get-Candidates ($vs.Left + $x) ($vs.Top + $y)
+  } catch {
+    $script:candidates = @()
+  }
+  if ($script:snapIndex -ge $script:candidates.Count) { $script:snapIndex = 0 }
 }
 
 function Nudge([string]$key, [bool]$shift, [bool]$alt) {
@@ -176,6 +329,30 @@ function Nudge([string]$key, [bool]$shift, [bool]$alt) {
   $form.Invalidate()
 }
 
+$form.Add_MouseMove({
+  param($s, $e)
+  $script:mouse = New-Object System.Drawing.Point($e.X, $e.Y)
+  if ($script:pressed) {
+    $dx = [Math]::Abs($e.X - $script:anchor.X)
+    $dy = [Math]::Abs($e.Y - $script:anchor.Y)
+    if ($dx -gt 4 -or $dy -gt 4) { $script:dragging = $true }
+    if ($script:dragging) {
+      Set-Selection $script:anchor.X $script:anchor.Y $e.X $e.Y
+      $form.Invalidate()
+      return
+    }
+  }
+  # Hover snapping; holding Ctrl gives a free crosshair instead
+  $ctrl = ([System.Windows.Forms.Control]::ModifierKeys -band [System.Windows.Forms.Keys]::Control) -eq [System.Windows.Forms.Keys]::Control
+  if ($ctrl) {
+    $script:candidates = @()
+    $form.Invalidate()
+    return
+  }
+  Refresh-Candidates $e.X $e.Y $false
+  $form.Invalidate()
+})
+
 $form.Add_MouseDown({
   param($s, $e)
   if ($e.Button -eq [System.Windows.Forms.MouseButtons]::Right) {
@@ -186,27 +363,33 @@ $form.Add_MouseDown({
   if ($e.Button -ne [System.Windows.Forms.MouseButtons]::Left) { return }
   if ($e.Clicks -ge 2) {
     $script:sel = New-Object System.Drawing.Rectangle(0, 0, $vs.Width, $vs.Height)
-    $form.Invalidate()
+    $form.Close()
     return
   }
-  $script:dragging = $true
+  $script:pressed = $true
+  $script:dragging = $false
   $script:anchor = New-Object System.Drawing.Point($e.X, $e.Y)
-  $script:sel = $null
-  $form.Invalidate()
-})
-
-$form.Add_MouseMove({
-  param($s, $e)
-  if (-not $script:dragging) { return }
-  Set-Selection $script:anchor.X $script:anchor.Y $e.X $e.Y
-  $form.Invalidate()
 })
 
 $form.Add_MouseUp({
   param($s, $e)
-  if (-not $script:dragging) { return }
-  $script:dragging = $false
-  Set-Selection $script:anchor.X $script:anchor.Y $e.X $e.Y
+  if (-not $script:pressed) { return }
+  $script:pressed = $false
+  if ($script:dragging) {
+    $script:dragging = $false
+    Set-Selection $script:anchor.X $script:anchor.Y $e.X $e.Y
+    $form.Invalidate()
+    return
+  }
+  # A plain click accepts the snapped rect and finishes
+  Refresh-Candidates $e.X $e.Y $true
+  $snap = Snap-RectAt $e.X $e.Y
+  if ($snap) {
+    $script:sel = $snap
+    $form.Close()
+    return
+  }
+  $script:sel = $null
   $form.Invalidate()
 })
 
@@ -218,8 +401,20 @@ $form.Add_KeyDown({
     return
   }
   if ($e.KeyCode -eq [System.Windows.Forms.Keys]::Enter) {
-    if (-not $script:sel) { $script:sel = New-Object System.Drawing.Rectangle(0, 0, $vs.Width, $vs.Height) }
+    if (-not $script:sel) {
+      $snap = Snap-RectAt $script:mouse.X $script:mouse.Y
+      if ($snap) { $script:sel = $snap } else { $script:sel = New-Object System.Drawing.Rectangle(0, 0, $vs.Width, $vs.Height) }
+    }
     $form.Close()
+    return
+  }
+  if ($e.KeyCode -eq [System.Windows.Forms.Keys]::Tab) {
+    if ($script:candidates.Count -gt 0) {
+      $script:snapIndex = ($script:snapIndex + 1) % $script:candidates.Count
+      $form.Invalidate()
+    }
+    $e.Handled = $true
+    $e.SuppressKeyPress = $true
     return
   }
   $names = @('Left', 'Right', 'Up', 'Down')
@@ -246,25 +441,43 @@ $form.Add_Paint({
     if ($by -lt 0) { $by = $sel.Y + 6 }
     $g.FillRectangle($brushLabelBg, $bx, $by, $size.Width + 12, $size.Height + 4)
     $g.DrawString($text, $fontBig, $brushLabelFg, $bx + 6, $by + 2)
-  } else {
-    $cx = [int]($vs.Width / 2)
-    $cy = [int]($vs.Height / 2)
-    $size1 = $g.MeasureString($Hint, $fontBig)
-    $size2 = $g.MeasureString($HintKeys, $font)
-    $size3 = $g.MeasureString($HintDone, $font)
-    $wBox = [Math]::Max($size1.Width, [Math]::Max($size2.Width, $size3.Width)) + 32
-    $hBox = $size1.Height + $size2.Height + $size3.Height + 28
-    $bx = $cx - [int]($wBox / 2)
-    $by = $cy - [int]($hBox / 2)
-    $g.FillRectangle($brushHintBg, $bx, $by, $wBox, $hBox)
-    $g.DrawString($Hint, $fontBig, $brushLabelFg, $bx + 16, $by + 10)
-    $g.DrawString($HintKeys, $font, $brushLabelFg, $bx + 16, $by + 10 + $size1.Height + 2)
-    $g.DrawString($HintDone, $font, $brushLabelFg, $bx + 16, $by + 10 + $size1.Height + $size2.Height + 4)
-    $px = [Math]::Max(0, [System.Windows.Forms.Cursor]::Position.X - $vs.Left)
-    $py = [Math]::Max(0, [System.Windows.Forms.Cursor]::Position.Y - $vs.Top)
-    $g.DrawLine($penGuide, $px, 0, $px, $vs.Height)
-    $g.DrawLine($penGuide, 0, $py, $vs.Width, $py)
+    return
   }
+  $snap = $null
+  if (-not $script:dragging -and $script:candidates.Count -gt 0) { $snap = Snap-RectAt $script:mouse.X $script:mouse.Y }
+  if ($snap) {
+    $dest = New-Object System.Drawing.Rectangle($snap.X, $snap.Y, $snap.Width, $snap.Height)
+    $g.DrawImage($full, $dest, $dest, [System.Drawing.GraphicsUnit]::Pixel)
+    $g.DrawRectangle($penSnap, $snap.X, $snap.Y, $snap.Width, $snap.Height)
+    $idx = [Math]::Min($script:snapIndex, $script:candidates.Count - 1)
+    $label = [string]$script:candidates[$idx].label
+    if ($label.Length -gt 46) { $label = $label.Substring(0, 46) + '...' }
+    $caption = ('{0}  ({1} x {2})' -f $label, $snap.Width, $snap.Height)
+    $size = $g.MeasureString($caption, $font)
+    $bx = $snap.X
+    $by = $snap.Y - $size.Height - 6
+    if ($by -lt 0) { $by = $snap.Y + 6 }
+    $g.FillRectangle($brushLabelBg, $bx, $by, $size.Width + 12, $size.Height + 4)
+    $g.DrawString($caption, $font, $brushLabelFg, $bx + 6, $by + 2)
+    return
+  }
+  $cx = [int]($vs.Width / 2)
+  $cy = [int]($vs.Height / 2)
+  $size1 = $g.MeasureString($Hint, $fontBig)
+  $size2 = $g.MeasureString($HintKeys, $font)
+  $size3 = $g.MeasureString($HintDone, $font)
+  $wBox = [Math]::Max($size1.Width, [Math]::Max($size2.Width, $size3.Width)) + 32
+  $hBox = $size1.Height + $size2.Height + $size3.Height + 28
+  $bx = $cx - [int]($wBox / 2)
+  $by = $cy - [int]($hBox / 2)
+  $g.FillRectangle($brushHintBg, $bx, $by, $wBox, $hBox)
+  $g.DrawString($Hint, $fontBig, $brushLabelFg, $bx + 16, $by + 10)
+  $g.DrawString($HintKeys, $font, $brushLabelFg, $bx + 16, $by + 10 + $size1.Height + 2)
+  $g.DrawString($HintDone, $font, $brushLabelFg, $bx + 16, $by + 10 + $size1.Height + $size2.Height + 4)
+  $px = [Math]::Max(0, [System.Windows.Forms.Cursor]::Position.X - $vs.Left)
+  $py = [Math]::Max(0, [System.Windows.Forms.Cursor]::Position.Y - $vs.Top)
+  $g.DrawLine($penGuide, $px, 0, $px, $vs.Height)
+  $g.DrawLine($penGuide, 0, $py, $vs.Width, $py)
 })
 
 [void]$form.ShowDialog()

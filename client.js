@@ -231,8 +231,8 @@ window.__ModuleLoader__.load({
       log(`startCapture:${mode}`)
       store.set({ phase: 'capturing' })
       const hints = {
-        hint: T('拖动框选区域 · 桌面 / 浏览器任意位置', 'Drag to select — anywhere on screen'),
-        hintKeys: T('方向键微调 1px · Shift+方向键 10px · Alt+方向键改大小', 'Arrows 1px · Shift+arrows 10px · Alt+arrows resize'),
+        hint: T('悬停自动吸附：窗口 / 应用内模块 / 网页元素', 'Hover to snap: window / pane / web element'),
+        hintKeys: T('单击确认 · Tab 换吸附层级 · 方向键微调 1px（Shift 10px）· 按住 Ctrl 自由框选', 'Click to confirm · Tab cycles levels · arrows 1px (Shift 10px) · hold Ctrl for a free drag'),
         hintDone: T('Enter 完成 · Esc 取消 · 双击 = 整屏', 'Enter confirm · Esc cancel · double-click = whole screen'),
       }
       try {
@@ -1222,8 +1222,10 @@ window.__ModuleLoader__.load({
       },
       h('div', { className: 'dshs-help-title' }, T('快捷键', 'Shortcuts')),
       [
-        ['Ctrl + Shift + X', T('区域截图：全屏框选任意画面', 'Region capture: frame anything on screen')],
-        ['Ctrl + Shift + A', T('整屏截图', 'Whole screen')],
+        ['Ctrl + Shift + X', T('截图：悬停自动吸附，框选屏幕上任意画面', 'Capture: hover snaps, frame anything on screen')],
+        ['Tab', T('切换吸附层级：元素 → 模块 → 整个窗口', 'Cycle snap level: element -> pane -> window')],
+        ['Ctrl（按住）', T('临时关掉吸附，自由框选', 'Hold to turn snapping off')],
+        ['双击', T('直接选整屏', 'Select the whole screen')],
         ['← ↑ ↓ →', T('微调选区 1px', 'Nudge selection 1px')],
         ['Shift + 方向键', T('微调 10px', 'Nudge 10px')],
         ['Alt + 方向键', T('改选区大小', 'Resize the selection')],
@@ -1407,11 +1409,11 @@ window.__ModuleLoader__.load({
           const onKey = (event) => {
             const key = String(event.key || '').toLowerCase()
             if (!event.shiftKey || !(event.ctrlKey || event.metaKey)) return
-            if (key !== 'x' && key !== 'a') return
+            if (key !== 'x') return
             log(`hotkey:${key}`)
             event.preventDefault()
             event.stopPropagation()
-            void startCapture(key === 'a' ? 'full' : 'rect')
+            void startCapture('rect')
           }
           window.addEventListener('keydown', onKey, true)
 
@@ -1420,7 +1422,7 @@ window.__ModuleLoader__.load({
             if (!window.localStorage.getItem(HINT_KEY)) {
               window.localStorage.setItem(HINT_KEY, '1')
               setTimeout(() => {
-                store.set({ toast: T('截图：Ctrl+Shift+X 区域 · Ctrl+Shift+A 整屏 · 工具栏 ? 看全部快捷键', 'Screenshot: Ctrl+Shift+X region · Ctrl+Shift+A whole screen · ? in the toolbar for all shortcuts') })
+                store.set({ toast: T('截图：Ctrl+Shift+X · 悬停自动吸附窗口/模块/网页元素 · 单击确认 · Tab 换层级 · 工具栏 ? 看全部快捷键', 'Screenshot: Ctrl+Shift+X · hover snaps to window/pane/web element · click to confirm · Tab cycles · ? for all shortcuts') })
                 setTimeout(() => store.set({ toast: null }), 9000)
               }, 1500)
             }
