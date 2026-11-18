@@ -24,6 +24,7 @@ import { decode } from './image.js'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const PS_SCRIPT = join(HERE, 'capture-screen.ps1')
+const SELECT_SCRIPT = join(HERE, 'select-rect.ps1')
 const require = createRequire(import.meta.url)
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
@@ -87,8 +88,62 @@ function runHelper(args) {
   })
 }
 
-/** 虚拟桌面与光标信息；非 Windows 返回 null。 */
-export async function desktopMetrics() {
+/**
+ * 跑原生框选层。它是交互式的，用户可能盯着屏幕挑很久，所以不设超时。
+ * @param {string[]} args
+ * @returns {Promise<string>} 助手打印的 JSON 行
+ */
+function runSelector(args) {
+  const exe = powerShell()
+  if (exe === null) throw new Error('原生全屏框选只在 Windows 上可用')
+  return new Promise((resolve, reject) => {
+    execFile(exe, ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', SELECT_SCRIPT, ...args], {
+      windowsHide: true,
+      timeout: 0,
+      maxBuffer: 1 << 20,
+    }, (error, stdout, stderr) => {
+      if (error) {
+        reject(new Error(`框选层启动失败：${String(stderr || error.message).trim().slice(0, 400)}`))
+        return
+      }
+      resolve(String(stdout || '').trim())
+    })
+  })
+}
+
+/**
+ * 冻结整个桌面，让用户在全屏上框选一块，然后把这块按原始像素裁下来。
+ * 这就是"截桌面上任意画面"的入口：浏览器、别的应用、桌面本身，都在里面。
+ *
+ * @param {{mode?:'rect'|'full',hint?:string,hintKeys?:string,hintDone?:string}} options
+ * @returns {Promise<{cancelled:true}|{png:Buffer,rect:{x:number,y:number,width:number,height:number}}>}
+ */
+export async function selectRegion(options = {}) {
+  const mode = options.mode === 'full' ? 'full' : 'rect'
+  const file = tempFile()
+  const args = ['-Mode', mode, '-Out', file]
+  if (options.hint) args.push('-Hint', String(options.hint))
+  if (options.hintKeys) args.push('-HintKeys', String(options.hintKeys))
+  if (options.hintDone) args.push('-HintDone', String(options.hintDone))
+  try {
+    const stdout = await runSelector(args)
+    const line = stdout.split(/\r?\n/).map((row) => row.trim()).filter(Boolean).pop() || '{}'
+    let parsed
+    try {
+      parsed = JSON.parse(line)
+    } catch {
+      throw new Error(`框选层返回了无法解析的结果：${line.slice(0, 200)}`)
+    }
+    if (!parsed.ok) return { cancelled: true }
+    const png = readFileSync(file)
+    if (!png.length) throw new Error('框选层没有产出图片')
+    return { png, rect: parsed.rect }
+  } finally {
+    rmSync(file, { force: true })
+  }
+}
+
+/** 虚拟桌面与光标信息；非 Windows 返回 null。 */export async function desktopMetrics() {
   if (process.platform !== 'win32') return null
   try {
     const out = await runHelper(['-Mode', 'metrics'])

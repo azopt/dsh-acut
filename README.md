@@ -1,11 +1,27 @@
 # ACut
 
-**Screenshot plugin for DeepSeek Harness** (`dsh-acut`): press **Ctrl+Shift+X**, drag a region,
-annotate it, or stitch a scrolling page into one long image — and the same capture engine is
-exposed to the agent as the `screenshot` tool.
+**Screenshot plugin for DeepSeek Harness** (`dsh-acut`): press **Ctrl+Shift+X**, frame a region
+anywhere on screen — a browser, another app, the desktop itself — annotate it, or stitch a
+scrolling page into one long image. The same capture engine is exposed to the agent as the
+`screenshot` tool.
 
-截图插件：**Ctrl+Shift+X** 唤起、拖出选区、随手标注、滚屏截成一张长图；同一套抓屏引擎还作为
-`screenshot` 工具交给 Agent 用。
+截图插件：**Ctrl+Shift+X** 冻结整个桌面、在屏幕上任意位置框选（浏览器、别的应用、桌面本身都算），
+拖出选区、随手标注、还能滚屏截成一张长图；同一套抓屏引擎也作为 `screenshot` 工具交给 Agent 用。
+
+## 快捷键
+
+| 快捷键 | 作用 |
+| --- | --- |
+| `Ctrl+Shift+X` | 区域截图：冻结整个桌面，全屏框选任意画面 |
+| `Ctrl+Shift+A` | 整屏截图：一次抓整个虚拟桌面（多显示器也在内） |
+| `←` `↑` `↓` `→` | 选区微调 1px |
+| `Shift` + 方向键 | 选区微调 10px |
+| `Alt` + 方向键 | 改选区大小（1px） |
+| `S` | 滚动截图（拉出选区后可用） |
+| `Enter` | 完成：存 PNG 并复制到剪贴板 |
+| `Esc` | 取消 |
+
+框选层里还能直接 **双击 = 选整屏**。工具栏右侧的 **?** 按钮随时列出这张表，首次安装也会弹一次提示。
 
 ```
 ┌─────────────────────────────────────────────┐
@@ -30,7 +46,11 @@ dsh plugin --profile <你的 profile> add dsh-acut
 
 | 能力 | 说明 |
 | --- | --- |
-| 热键唤起 | `Ctrl+Shift+X`（macOS `⌘+Shift+X`），在任意 Harness 页面按下即可 |
+| 热键唤起 | `Ctrl+Shift+X` 区域截图、`Ctrl+Shift+A` 整屏截图（macOS `⌘` 代替 `Ctrl`） |
+| 全屏框选 | 冻结整个桌面后铺满全屏、压暗，拖框选任意画面：浏览器、别的应用、桌面本身都行；框到哪块就按**原始像素**裁下来，再回到本窗口标注 |
+| 整屏截图 | `Ctrl+Shift+A` 直接抓整个虚拟桌面，多显示器合成一张 |
+| 方向键微调 | 框选后 `←↑↓→` 微调 1px，`Shift+方向键` 10px，`Alt+方向键` 改大小；鼠标拖完再微调不用重来 |
+| 快捷键一览 | 工具栏 **?** 按钮列出全部快捷键；首次安装弹一次提示，之后安静 |
 | 冻结帧 | 先抓屏再画遮罩，所以遮罩自己永远不会进入截图 |
 | 选区 | 拖动创建、八向手柄调整大小、实时尺寸角标 |
 | 标注 | 矩形、椭圆、箭头、画笔、文字、马赛克；四种颜色；撤销 |
@@ -69,7 +89,7 @@ PNG 编解码自带（`src/png.js`，zlib + 手写反滤波），所以没有额
 
 ## 已知限制
 
-- 热键固定为 `Ctrl+Shift+X`，还没接进 Harness 的快捷键面板。
+- 热键固定为 `Ctrl+Shift+X` / `Ctrl+Shift+A`，还没接进 Harness 的快捷键面板。
 - 滚动截图依赖页面本身能滚动；会话正在流式输出时视图会被钉在底部，这时会一直停在
   "滚一下开始拼接"——等这一轮跑完再截即可。无限列表、懒加载内容可能拼不全。
 - 滚动截图会吞掉鼠标点击（避免误触页面按钮），但滚轮和拖动都交给你自己控制。
@@ -77,7 +97,7 @@ PNG 编解码自带（`src/png.js`，zlib + 手写反滤波），所以没有额
   只框住真正滚动的内容列最干净。
 - 长图上限：400 帧 / 30000px 高（触顶时进度条会写「已达上限」）。
 - 桌面模式滚屏会把鼠标移到选区中心滚轮，结束后还原位置；期间不要动鼠标。
-- 冻结帧只覆盖本窗口；要抓别的程序请用 Agent 工具的 `screen`。
+- 原生全屏框选依赖 Windows PowerShell + WinForms；拿不到时自动退回"只框本窗口"的旧路径，功能不中断。
 
 ## 语言：跟随系统
 

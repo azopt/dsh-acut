@@ -66,6 +66,8 @@ window.__ModuleLoader__.load({
     const PREVIEW_MAX_H = 380
     /** 已经有结果时，要多拖这么远才允许重新拉选区（防误点清空长图）。 */
     const NEW_SELECTION_DRAG = 8
+    /** 首屏快捷键提示只弹一次。 */
+    const HINT_KEY = 'dsh-acut:hint-v1'
 
     /* ── 组件状态 ─────────────────────────────────────────────────────────── */
     const store = {
@@ -78,6 +80,7 @@ window.__ModuleLoader__.load({
         annotations: [],
         draft: null,
         toast: null,
+        showHelp: false,
       },
       listeners: new Set(),
       get() {
@@ -92,7 +95,7 @@ window.__ModuleLoader__.load({
         return () => store.listeners.delete(listener)
       },
       reset() {
-        store.set({ phase: 'idle', frozen: null, rect: null, annotations: [], draft: null, manualId: null, manualRect: null, manualFrames: 0, manualW: 0, manualH: 0, manualError: null, manualPreview: null, manualFull: false })
+        store.set({ phase: 'idle', frozen: null, rect: null, annotations: [], draft: null, showHelp: false, manualId: null, manualRect: null, manualFrames: 0, manualW: 0, manualH: 0, manualError: null, manualPreview: null, manualFull: false })
       },
     }
 
@@ -188,6 +191,52 @@ window.__ModuleLoader__.load({
         log(`openCapture:fail ${String(error?.message ?? error)}`)
         store.reset()
         toast(`${T('截图失败：', 'Capture failed: ')}${String(error?.message ?? error)}`)
+      }
+    }
+
+    /**
+     * 全屏冻结 + 原生框选：截桌面上任何东西（浏览器、别的应用、桌面本身），
+     * 框到哪块就把哪块按原始像素裁下来，再回到这里标注/保存。
+     * 宿主不支持（非 Windows、助手起不来）时退回窗口内冻结。
+     */
+    async function startCapture(mode = 'rect') {
+      if (store.state.phase !== 'idle' && store.state.phase !== 'select') return
+      log(`startCapture:${mode}`)
+      store.set({ phase: 'capturing' })
+      try {
+        const data = await post('select', {
+          mode,
+          hint: T('拖动框选区域 · 桌面 / 浏览器任意位置', 'Drag to select — anywhere on screen'),
+          hintKeys: T('方向键微调 1px · Shift+方向键 10px · Alt+方向键改大小', 'Arrows 1px · Shift+arrows 10px · Alt+arrows resize'),
+          hintDone: T('Enter 完成 · Esc 取消 · 双击 = 整屏', 'Enter confirm · Esc cancel · double-click = whole screen'),
+        })
+        if (data.cancelled) {
+          store.reset()
+          return
+        }
+        if (!data.ok) throw new Error(data.error || 'native select unavailable')
+        const imgW = Math.max(1, Number(data.width) || 1)
+        const imgH = Math.max(1, Number(data.height) || 1)
+        const vw = window.innerWidth
+        const vh = window.innerHeight
+        const fit = Math.min(1, (vw - 48) / imgW, (vh - 140) / imgH)
+        const cssW = Math.max(1, Math.round(imgW * fit))
+        const scale = imgW / cssW
+        const cssH = Math.max(1, Math.round(imgH / scale))
+        const offsetX = Math.round((vw - cssW) / 2)
+        const offsetY = Math.round((vh - cssH) / 2)
+        log(`startCapture:ok ${imgW}x${imgH} css=${cssW}x${cssH} scale=${scale.toFixed(2)}`)
+        store.set({
+          phase: 'select',
+          frozen: { dataUrl: data.dataUrl, width: imgW, height: imgH, cssWidth: cssW, cssHeight: cssH, scale, offsetX, offsetY, source: 'crop', screenRect: data.screenRect },
+          rect: { x: offsetX, y: offsetY, width: cssW, height: cssH },
+          annotations: [],
+          draft: null,
+        })
+      } catch (error) {
+        log(`startCapture:fallback ${String(error?.message ?? error)}`)
+        store.reset()
+        await openCapture()
       }
     }
 
@@ -892,6 +941,27 @@ window.__ModuleLoader__.load({
         if (state.phase === 'idle') return
         const onKey = (event) => {
           const phase = store.state.phase
+          // 方向键微调选区：裸方向键移动 1px，Shift ×10，Alt 改成改大小。
+          const arrows = { ArrowLeft: [-1, 0], ArrowRight: [1, 0], ArrowUp: [0, -1], ArrowDown: [0, 1] }
+          const dir = arrows[event.key]
+          if (dir && phase === 'select' && !editing && store.state.rect) {
+            event.preventDefault()
+            event.stopPropagation()
+            const rect = store.state.rect
+            const step = event.shiftKey ? 10 : 1
+            if (event.altKey) {
+              store.set({
+                rect: clampToViewport({
+                  ...rect,
+                  width: Math.max(MIN_SIZE, rect.width + dir[0] * step),
+                  height: Math.max(MIN_SIZE, rect.height + dir[1] * step),
+                }),
+              })
+            } else {
+              store.set({ rect: clampToViewport({ ...rect, x: rect.x + dir[0] * step, y: rect.y + dir[1] * step }) })
+            }
+            return
+          }
           if (event.key === 'Escape') {
             event.preventDefault()
             event.stopPropagation()
@@ -1105,6 +1175,13 @@ window.__ModuleLoader__.load({
       h('span', { className: 'dshs-divider' }),
       h('button', {
         type: 'button',
+        className: `dshs-icon${state.showHelp ? ' is-active' : ''}`,
+        title: T('快捷键一览', 'Keyboard shortcuts'),
+        'aria-label': T('快捷键一览', 'Keyboard shortcuts'),
+        onClick: () => store.set({ showHelp: !state.showHelp }),
+      }, icon('M12 17h.01M9.5 9.2a2.6 2.6 0 1 1 3.9 2.4c-.9.5-1.4 1-1.4 2')),
+      h('button', {
+        type: 'button',
         className: 'dshs-icon',
         title: T('取消', 'Cancel'),
         'aria-label': T('取消', 'Cancel'),
@@ -1117,7 +1194,25 @@ window.__ModuleLoader__.load({
         disabled: !active,
         onClick: save,
       }, icon('m5 12 4 4L19 6'), h('span', null, T('完成', 'Done')))),
-      active ? null : h('div', { className: 'dshs-hint' }, T('拖动选择区域 · S 滚动截图 · Esc 取消 · Enter 完成', 'Drag to select · S scroll capture · Esc to cancel · Enter to finish')),
+      active ? null : h('div', { className: 'dshs-hint' }, T('拖动选择区域 · 方向键微调 · S 滚动截图 · Enter 完成 · Esc 取消', 'Drag to select · arrows nudge · S scroll capture · Enter finish · Esc cancel')),
+      state.showHelp ? h('div', {
+        className: 'dshs-help',
+        'data-dsh-acut-ui': UI_ID,
+        onPointerDown: (event) => event.stopPropagation(),
+      },
+      h('div', { className: 'dshs-help-title' }, T('快捷键', 'Shortcuts')),
+      [
+        ['Ctrl + Shift + X', T('区域截图：全屏框选任意画面', 'Region capture: frame anything on screen')],
+        ['Ctrl + Shift + A', T('整屏截图', 'Whole screen')],
+        ['← ↑ ↓ →', T('微调选区 1px', 'Nudge selection 1px')],
+        ['Shift + 方向键', T('微调 10px', 'Nudge 10px')],
+        ['Alt + 方向键', T('改选区大小', 'Resize the selection')],
+        ['S', T('滚动截图', 'Scrolling capture')],
+        ['Enter', T('完成：复制 + 保存', 'Done: copy + save')],
+        ['Esc', T('取消', 'Cancel')],
+      ].map(([keys, text]) => h('div', { key: keys, className: 'dshs-help-row' },
+        h('kbd', null, keys),
+        h('span', null, text)))) : null,
       state.toast ? h('div', { className: 'dshs-toast', 'data-dsh-acut-ui': UI_ID }, state.toast) : null,
       )
     }
@@ -1270,6 +1365,11 @@ window.__ModuleLoader__.load({
     .dshs-manual-btn.is-primary:hover{background:#0e63d8}
     .dshs-manual-btn:disabled{opacity:.4;cursor:default}
     .dshs-toast{position:fixed;left:50%;bottom:28px;transform:translateX(-50%);max-width:70vw;padding:10px 16px;border-radius:10px;background:rgba(24,26,32,.96);color:#fff;font-size:13px;z-index:2147482300;pointer-events:none;word-break:break-all}
+    .dshs-help{position:fixed;right:24px;bottom:24px;z-index:2147482200;background:rgba(20,22,28,.97);border:1px solid rgba(255,255,255,.14);border-radius:12px;padding:12px 14px;color:#fff;font-size:12.5px;min-width:320px;box-shadow:0 18px 40px rgba(0,0,0,.45)}
+    .dshs-help-title{font-size:11.5px;color:#a8a29e;margin-bottom:8px;letter-spacing:.06em;text-transform:uppercase}
+    .dshs-help-row{display:flex;align-items:center;gap:10px;padding:3px 0}
+    .dshs-help-row kbd{flex:0 0 auto;min-width:128px;font:inherit;font-size:12px;color:#c9d3ff;background:rgba(255,255,255,.1);border:1px solid rgba(255,255,255,.16);border-radius:6px;padding:2px 7px;text-align:center;white-space:nowrap}
+    .dshs-help-row span{color:#e7e5e4}
     @keyframes dshs-spin{to{transform:rotate(360deg)}}
     `
 
@@ -1286,13 +1386,27 @@ window.__ModuleLoader__.load({
 
           const onKey = (event) => {
             const key = String(event.key || '').toLowerCase()
-            if (key !== 'x' || !event.shiftKey || !(event.ctrlKey || event.metaKey)) return
-            log('hotkey')
+            if (!event.shiftKey || !(event.ctrlKey || event.metaKey)) return
+            if (key !== 'x' && key !== 'a') return
+            log(`hotkey:${key}`)
             event.preventDefault()
             event.stopPropagation()
-            void openCapture()
+            void startCapture(key === 'a' ? 'full' : 'rect')
           }
           window.addEventListener('keydown', onKey, true)
+
+          // 第一次装上时告诉用户快捷键在哪儿看，之后不再打扰。
+          try {
+            if (!window.localStorage.getItem(HINT_KEY)) {
+              window.localStorage.setItem(HINT_KEY, '1')
+              setTimeout(() => {
+                store.set({ toast: T('截图：Ctrl+Shift+X 区域 · Ctrl+Shift+A 整屏 · 工具栏 ? 看全部快捷键', 'Screenshot: Ctrl+Shift+X region · Ctrl+Shift+A whole screen · ? in the toolbar for all shortcuts') })
+                setTimeout(() => store.set({ toast: null }), 9000)
+              }, 1500)
+            }
+          } catch {
+            /* 隐私模式没有 localStorage，就不提示了 */
+          }
 
           return () => {
             window.removeEventListener('keydown', onKey, true)

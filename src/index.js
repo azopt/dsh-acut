@@ -17,7 +17,7 @@ import { homedir, tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
-import { acquireLiveHelper, captureScreen, captureWindow, desktopMetrics, electron, listWindows, sameFrame, savePng, scrollScreen, scrollWindow, sleep } from './capture.js'
+import { acquireLiveHelper, captureScreen, captureWindow, desktopMetrics, electron, listWindows, sameFrame, savePng, scrollScreen, scrollWindow, selectRegion, sleep } from './capture.js'
 import { decode, encode, mergeFrame, resizeToWidth, stitch } from './image.js'
 import { detectLanguage, stringsFor } from './i18n.js'
 
@@ -790,6 +790,28 @@ function registerRoutes(ctx, settings) {
           screenRect: clip,
           offsetX: (clip.x - want.x) / scale,
           offsetY: (clip.y - want.y) / scale,
+        })
+      }],
+      [`${ROUTE_BASE}/select`, async (req, res) => {
+        if (String(req.method || 'GET').toUpperCase() !== 'POST') return json(res, 405, { ok: false, error: 'method' })
+        const body = await readJson(req)
+        if (process.platform !== 'win32') return json(res, 200, { ok: false, unsupported: true })
+        let shot
+        try {
+          shot = await selectRegion({ mode: body.mode, hint: body.hint, hintKeys: body.hintKeys, hintDone: body.hintDone })
+        } catch (error) {
+          appendLog(`[host] select failed: ${String(error?.message ?? error)}`)
+          return json(res, 200, { ok: false, error: String(error?.message ?? error) })
+        }
+        if (shot.cancelled) return json(res, 200, { ok: false, cancelled: true })
+        const raster = decode(shot.png)
+        json(res, 200, {
+          ok: true,
+          source: 'crop',
+          dataUrl: bufferToDataUrl(shot.png),
+          width: raster.width,
+          height: raster.height,
+          screenRect: shot.rect,
         })
       }],
       [`${ROUTE_BASE}/scroll`, async (req, res) => {
