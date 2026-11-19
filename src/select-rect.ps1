@@ -293,14 +293,14 @@ $form.Text = 'ACut'
 # The window is mapped before its first paint, so a default-coloured frame would
 # flash for a moment. Paint the dimmed freeze as the background and stay fully
 # transparent until that first frame is on screen.
+# The window is mapped before its first paint, so a default-coloured frame could
+# flash for a moment: give it the dimmed freeze as its background instead, which
+# is already on screen in the very first frame.
+# (Deliberately NOT using Form.Opacity: a layered window is skipped by GDI screen
+# capture, which would also hide it from screenshots taken with this plugin.)
 $form.BackColor = [System.Drawing.Color]::Black
 $form.BackgroundImage = $dim
 $form.BackgroundImageLayout = [System.Windows.Forms.ImageLayout]::Stretch
-$form.Opacity = 0
-$form.Add_Shown({
-  $form.Refresh()
-  $form.Opacity = 1
-})
 
 # NOTE: double buffering is deliberately NOT enabled - a buffered 3440x1440
 # fullscreen form repaints unreliably here, the dim layer ends up not being shown.
