@@ -290,6 +290,18 @@ $form.Cursor = [System.Windows.Forms.Cursors]::Cross
 $form.KeyPreview = $true
 $form.Text = 'ACut'
 
+# The window is mapped before its first paint, so a default-coloured frame would
+# flash for a moment. Paint the dimmed freeze as the background and stay fully
+# transparent until that first frame is on screen.
+$form.BackColor = [System.Drawing.Color]::Black
+$form.BackgroundImage = $dim
+$form.BackgroundImageLayout = [System.Windows.Forms.ImageLayout]::Stretch
+$form.Opacity = 0
+$form.Add_Shown({
+  $form.Refresh()
+  $form.Opacity = 1
+})
+
 # NOTE: double buffering is deliberately NOT enabled - a buffered 3440x1440
 # fullscreen form repaints unreliably here, the dim layer ends up not being shown.
 
@@ -463,7 +475,6 @@ $form.Add_KeyDown({
 $form.Add_Paint({
   param($s, $e)
   $g = $e.Graphics
-  $g.DrawImage($dim, 0, 0, $vs.Width, $vs.Height)
   $sel = $script:sel
   if ($sel -and $sel.Width -gt 0 -and $sel.Height -gt 0) {
     $dest = New-Object System.Drawing.Rectangle($sel.X, $sel.Y, $sel.Width, $sel.Height)
