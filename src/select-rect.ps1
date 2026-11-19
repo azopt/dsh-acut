@@ -44,6 +44,8 @@ public struct AcutPoint { public int X, Y; }
 public static class AcutSnap {
   public delegate bool EnumProc(IntPtr hWnd, IntPtr lParam);
   [DllImport("user32.dll")] public static extern bool SetProcessDPIAware();
+  [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
+  [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr hWnd);
   [DllImport("user32.dll")] public static extern bool EnumWindows(EnumProc cb, IntPtr lParam);
   [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr hWnd);
   [DllImport("user32.dll")] public static extern bool IsIconic(IntPtr hWnd);
@@ -289,6 +291,12 @@ $form.ShowInTaskbar = $false
 $form.Cursor = [System.Windows.Forms.Cursors]::Cross
 $form.KeyPreview = $true
 $form.Text = 'ACut'
+$form.Add_HandleCreated({
+  try {
+    [void][AcutSnap]::ShowWindow($form.Handle, 5)
+    [void][AcutSnap]::SetForegroundWindow($form.Handle)
+  } catch { }
+})
 
 # The window is mapped before its first paint, so a default-coloured frame would
 # flash for a moment. Paint the dimmed freeze as the background and stay fully

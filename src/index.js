@@ -341,6 +341,33 @@ function sweepManualSessions() {
  * @param {object} ctx Cordis 上下文
  * @param {{outputDir?:string,frames?:number,delayMs?:number}} [config]
  */
+/**
+ * 全局快捷键助手：Harness 不在前台时也能截图（浏览器、别的应用、桌面）。
+ * 常驻一个 PowerShell 进程挂低级键盘钩子；按到 Ctrl+Shift+X 就自己跑一遍
+ * 框选 → 存图 → 复制 → 钉住。Harness 窗口在前台时它会让出按键，交给页面里的流程。
+ */
+function startGlobalHotkey(outputDir, hints = {}) {
+  if (process.platform !== 'win32') return null
+  const script = join(HERE, 'acut-hotkey.ps1')
+  if (!existsSync(script)) return null
+  const args = ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', script]
+  if (outputDir) args.push('-OutDir', outputDir)
+  if (hints.hint) args.push('-Hint', hints.hint)
+  if (hints.hintKeys) args.push('-HintKeys', hints.hintKeys)
+  if (hints.hintDone) args.push('-HintDone', hints.hintDone)
+  try {
+    const child = spawn('powershell.exe', args, { windowsHide: true, stdio: 'ignore', detached: false })
+    child.on('error', (error) => {
+      console.warn('[dsh-acut] 全局快捷键助手启动失败：', error?.message ?? error)
+    })
+    child.unref()
+    return child
+  } catch (error) {
+    console.warn('[dsh-acut] 全局快捷键助手启动失败：', error?.message ?? error)
+    return null
+  }
+}
+
 export async function apply(ctx, config = {}) {
   const language = await detectLanguage(config.language, electron)
   // 工具说明跟着系统语言走：中文系统给中文，其他一律英文（模型两种都读得懂）。
@@ -985,4 +1012,28 @@ function registerRoutes(ctx, settings) {
       }
     }, 'dsh-acut: capture routes')
   })
+
+  // 全局快捷键：只在 Windows 上装，失败不影响插件其它功能。
+  const hotkey = startGlobalHotkey(settings.outputDir, language.lang === 'zh'
+    ? {
+        hint: '悬停自动吸附：窗口 / 应用内模块 / 网页元素',
+        hintKeys: '单击确认 · Tab 换吸附层级 · 方向键微调 · 按住 Ctrl 自由框选',
+        hintDone: 'Enter 完成 · Esc 取消 · 双击 = 整屏',
+      }
+    : {
+        hint: 'Hover to snap: window / pane / web element',
+        hintKeys: 'Click to confirm · Tab cycles levels · arrows nudge · hold Ctrl for a free drag',
+        hintDone: 'Enter confirm · Esc cancel · double-click = whole screen',
+      })
+  if (hotkey) {
+    const stop = () => {
+      try {
+        hotkey.kill()
+      } catch {
+        /* 已经退出了 */
+      }
+    }
+    if (typeof ctx?.effect === 'function') ctx.effect(() => stop, 'dsh-acut: global hotkey')
+    else process.once('exit', stop)
+  }
 }
